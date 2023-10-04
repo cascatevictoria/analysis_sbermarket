@@ -1,0 +1,532 @@
+---
+title: "Data analysis on Sbermarket"
+author: "Victoria Bolotova"
+date: "11 12 2021"
+output: 
+    html_document:
+      theme: cosmo
+      code_folding: show
+      toc: true
+      toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+
+My objective is to analyze the data helping the sbermarket team to: 
+
+* understand the situation
+* segment customers
+* identify customers with the highest risk of churning
+* give recommendations to improve customer satisfaction
+
+# Exploratory Data Analysis & Business Metrics
+
+```{r}
+library(readr)
+library(plyr)
+library(dplyr)
+library(psych)
+library(purrr)
+library(cluster)
+```
+
+The first thing to do after loading the libraries is to read and clean the data. To join files, I need to read every of them and they use `left_join`.
+
+```{r}
+CI <- read.csv("CustomerInfo.csv")
+#code to recode cyrillic type
+Encoding(CI$gender) <- "UTF-8"
+Encoding(CI$city) <- "UTF-8"
+Encoding(CI$age_group) <- "UTF-8"
+CE <- read.csv("CustomerExperience.csv")
+OF <- read.csv("OrdersFinance.csv")
+CD <- read.csv("CustomerDelivery.csv")
+sber_df <- as.data.frame(CE) %>%
+left_join(OF) %>%
+left_join(CD) %>%
+left_join(CI) 
+```
+
+Now I should get rid of duplicates and unnecessary columns. In the data where was a problem with sign +, so it should be fixed. Also, in the subsequent analysis, it turned out that 2 observations did not have any value for `platfrom` variable, so the data should be filtered. 
+
+```{r}
+sber <- subset(sber_df,!duplicated(sber_df$user_id))
+sber <- sber %>% dplyr::select(- user_id, - CE_id, - phone_id, - dw_id, - X)
+sber <- na.omit(sber)
+sber <- sber %>% filter(platform %in% c("web", "app")) 
+sber[sber == "75 Рё СЃС‚Р°СЂС€Рµ"] <- "75+" 
+
+nrow(sber)
+```
+In total, 5327 customers would be in the analysis.
+
+Now I am going to explore the most basic information. 
+
+```{r}
+summary_df <- sber %>% dplyr::select(mean_rate, avg_check, timediff_order, savings, spendings, num_orders)
+summary(summary_df)
+```
+
+* On average, customers' assessment of the service equals to 3. 50% of customers assess the service higher than 2.8 and 50% of customers assess the service lower than 2.8. Maximum assessment is 5 out of 5.
+* An average check of customers is 138 rubles. 50% of customers' average checks are higher than 121 rubles and 50% of customers' average checks are lower than 121 rubles. Customers' average checks are really small in their monetary value. The company should boost people to buy more, for example, supplementary goods and cross-selling should be enhanced. The company should allocate money for conducting market basket analysis.
+* On average, customers do not buy anything from their last purchase during 105 days - this is more than 2 months, which is a very long time for e-grocery delivery. 
+* Average cash back among all customers is 3 thousands and 352 rubles. 50% of customers have cash back higher than 2 thousands and 50% of customers lower than 2 thousands. 
+* An average spending is approximately 18 thousands. 50% of customers spent higher than 12.6 thousands and 50% of customers spent lower than 12.6 thousands.
+
+
+## Customers' satisfaction
+
+One of the key business metric is customers' satisfaction, so it needed to be expored. 
+
+```{r}
+satisfaction_barplot  <- sber %>% 
+  group_by(satisfaction) %>% 
+ dplyr::summarize(count = n()) %>%  
+ mutate(percentage = count/sum(count)) 
+
+library(ggplot2)
+ggplot(satisfaction_barplot, aes(x = reorder(satisfaction, -percentage), y = percentage, fill = satisfaction)) + 
+  geom_bar(stat='identity', fill = '#367ECD', alpha = 0.7) + 
+  geom_text(aes(label=scales::percent(percentage)), position = position_stack(vjust = .5)) +
+  scale_y_continuous(labels = scales::percent) + 
+  labs(y="", 
+       x="Types of customers", 
+       title="40% of customers are detractors and 22% are passives!") +
+  theme_classic()
+```
+
+The business has a lot of detractors, highly dissatisfied customers who unlikely would buy another time and may even discourage others from buying from the service by negative comments in the Internet, for example. Passive customers is also significant group of customers, who are not so dissatisfied as detractors, but are not really enthusiastic about the service to be loyal and recommend the service to friends. Only 28.7% of customers are promoters, the company should maintain their loyalty and interest.
+
+**Customers' satisfaction influences on their decision to buy next time**
+
+Most of the time since the last purchase has passed for passives. Detractors are also prone to don't buy for a long time. Thus, the problem of customer satisfaction is reflected in the long time after the last purchase. 
+
+```{r}
+library(dplyr)
+sber %>%
+  group_by(satisfaction) %>%
+  dplyr::summarise(number_of_customers = n(),
+             passed_days = round(mean(timediff_order, na.rm = T),0),
+             sd = sd(timediff_order)) %>%
+  arrange(passed_days)
+```
+
+
+## How customers assess the service on average depending on the age group:
+
+* The smallest groups of elderly people (75+ & 65-74) rate the service the worst. 
+* A large youngest age group (15-24) is also highly dissatisfied. 
+* The highest rating among age groups is given to the service by age groups 25-34 and 35-44.
+
+```{r}
+sber %>%
+  group_by(age_group) %>%
+  dplyr::summarise(number_of_customers = n(),
+            rate = mean(mean_rate, na.rm = T), 
+            sd = sd(mean_rate)) %>%
+  arrange(rate)
+```
+
+The business should conduct the focus group with the groups of elderly people and with the youngest age group.
+
+Let's explore age categories further. 
+
+## What platform different age categories prefer?
+
+* Older age groups prefer to use the website to contact the service, it can be assumed that their lack of satisfaction is associated with poor adoption of the site for older people who find it difficult to deal with interfaces that are incomprehensible to them. In addition, the lack of a version for the visually impaired may be the reason for low satisfaction.
+
+
+```{r}
+age_platform_df <- sber %>%
+group_by(age_group, platform) %>%
+dplyr::summarize(count = n()) 
+
+ggplot(age_platform_df, aes(age_group, count, fill = platform)) +
+geom_bar(position = "dodge", stat="identity", alpha = 0.7) + labs(y="Number of customers",
+x="Customer age group",
+title="Which kind of platform each age category prefer?") +
+scale_fill_manual("Platform",values = c('#367ECD', '#004AAD')) +
+geom_text(aes(label=count), position=position_dodge(width=0.9), vjust=-0.25) + 
+theme_classic() #Alexandra's graph
+```
+
+Let's look at the clients' assessment of the service for app and website.
+
+```{r}
+sber %>%
+  group_by(platform) %>%
+  dplyr::summarise(number_of_customers = n(),
+            rate = round(mean(mean_rate, na.rm = T), 2), 
+            sd = round(sd(mean_rate), 2)) %>%
+  arrange(rate)
+```
+
+* Customers who are using app to make the order rate the service by approximately 1 point higher (3.19) than customers who are using website (2.31). This difference is not small and should be explored further. 
+
+```{r}
+ggplot(sber, aes(x = age_group, y = timediff_order, fill = age_group)) +
+geom_boxplot(alpha = 0.7, fill = '#367ECD') +
+labs(x = "Age group",
+y = "Number of days after the last purchase" ,
+title = "Number of days after the last purchase depending on the age group") +
+theme_classic() +
+theme(legend.position = "none")
+```
+
+For groups aged 45-54 and 55-64 more days have passed since the last purchase, compared to other age groups. The youngest group (15-24) has the smallest number of days since their last purchase. 
+
+## Cities
+
+**Top 10 cities by the largest number of customers**
+
+```{r}
+city_customers_table <- sber %>%
+  group_by(city) %>%
+  dplyr::summarise(number_of_customers = n(),
+            rate = round(mean(mean_rate, na.rm = T),2), 
+            spendings = round(mean(spendings),0),
+            average_check = round(mean(avg_check),0),
+            passed_days = round(mean(timediff_order),0),
+            number_of_orders = round(mean(num_orders), 0)) %>%
+  arrange(- number_of_customers)
+head(city_customers_table, 10) 
+```
+
+* The largest number of customers live in big cities as Moscow, Saint Petersburg, Yekaterinburg. The number of passed days after the last purchase is the highest in Krasnodar and Rostov-on-Don, which should be taken into account. The lowest spendings of customers in Samara. Moscow, Krasnoyarsk and Tyumen and Rostov-on-Don have the lowest ratings. The average number of orders is the smallest in Saint Petersburg. The smallest average check is among customers, who live in Rostov-on-Don.
+
+**Top 10 cities by the smallest satisfaction with the service**
+
+Here I have filtered the result so that cities with more than 100 services' customers are shown to get non-biased estimation:
+
+```{r}
+city_rate_table <- sber %>%
+  group_by(city) %>%
+  dplyr::summarise(number_of_customers = n(),
+            rate = round(mean(mean_rate, na.rm = T),2), 
+            spendings = round(mean(spendings),0),
+            average_check = round(mean(avg_check),0),
+            passed_days = round(mean(timediff_order),0),
+            number_of_orders = round(mean(num_orders), 0)) %>%
+  arrange(rate)
+city_rate_table <- city_rate_table %>% dplyr::filter(number_of_customers > 100) 
+head(city_rate_table, 10) 
+```
+
+Customers in Voronezh, Moscow and Nizhny Novgorod are most dissatisfied with the service. As customers across all cities use the same app or website, I can assume that low satisfaction can be the outcome of poor and long delivery, the quality of products, the problems with the courier etc. 
+
+## Type of delivery
+
+```{r}
+sber$dw_kind <- as.factor(sber$dw_kind)
+dw_kind_barplot  <- sber %>% 
+  group_by(dw_kind) %>% 
+ dplyr::summarize(count = n()) %>%  
+ mutate(percentage = count/sum(count))
+library(ggplot2)
+ggplot(dw_kind_barplot, aes(x = reorder(dw_kind, - percentage), y = percentage, fill = dw_kind)) + 
+  geom_bar(stat='identity', fill = '#367ECD', alpha = 0.7) + 
+  geom_text(aes(label=scales::percent(percentage)), position = position_stack(vjust = .5)) +
+  scale_y_continuous(labels = scales::percent) + 
+  labs(y="Percentage", 
+       x="Type of delivery", 
+       title="98% customers use courier delivery") +
+  theme_classic()
+```
+
+* The delivery by courier is used by 98% of customers. 
+* Express delivery is used by less than 1% of customers, but it can be monetary valuable for the service to boost clients to use express delivery as the business could charge for fast delivery. 
+* Pickup is used by about 1% of customers, and this percentage is expected since the value of the online supermarket is to deliver directly to the apartment.
+
+Let's create the binary variable `churn` out of the feature, that denotes the number of passed days since the last purchase
+
+```{r}
+sber$churn[sber$timediff_order <= 180] <- "No"
+sber$churn[sber$timediff_order > 180] <- "Yes"
+```
+
+## Clustering with k-means
+
+Now we should choose suitable variables for segmentation with k-means.
+
+K-means can handle only continuous variables, so I have decided to use behavioral based segmentation.
+
+```{r}
+df_for_k_means <- sber %>% dplyr::select(mean_rate, avg_check, spendings, savings, num_orders)
+```
+
+Now we should make variables range from 0 to 1.
+
+To decide what number of clusters is the most meaningful, I would like to try different approaches.
+
+```{r}
+range01 <- function(x){(x-min(x))/(max(x)-min(x))}
+df_scaled <- colwise(range01)(df_for_k_means)
+```
+
+Creation of elbow_df
+
+```{r}
+total_withinss <- map_dbl(1:10, function(k){
+  model <- kmeans(x = df_scaled, centers = k)
+  model$tot.withinss
+})
+
+elbow_df <- data.frame(
+  k = 1:10,
+  total_withinss = total_withinss
+) #code from DataCamp's chapter on Cluster Analysis
+```
+
+Visualization
+
+```{r}
+ggplot(elbow_df, aes(x = k, y = total_withinss)) + 
+  geom_line() + 
+  scale_x_continuous(breaks = 1:10) +
+  labs(title = "Elbow plot", x = "Number of clusters K", y = "Total Within Sum of Square") +
+  theme_bw()
+```
+
+In this case we can see that there is a steep drop going from a k of 1 to 2 (and 3) and then a leveling off when moving between a k of 3 and 4 and onward.
+
+Now it seems that I can create clusters of size 2, 3 and 4.
+
+Now I am going to proceed to the next method to become more sure in our decision.
+
+**NB! The following code takes a long time to run**
+
+```{r}
+sil_width <- map_dbl(2:10, function(k){
+  model <- pam(x = df_scaled, k = k)
+  model$silinfo$avg.width
+})
+
+sil_df <- data.frame(
+  k = 2:10,
+  sil_width = sil_width) #code from DataCamp's chapter on Cluster Analysis
+```
+
+```{r}
+ggplot(sil_df, aes(x = k, y = sil_width)) +
+  geom_line() +
+  scale_x_continuous(breaks = 2:10) + 
+  labs(title = "Plot Average Silhouette Width", x = "Number of clusters K", y = "Average Silhouette Width") +
+  theme_bw()
+```
+
+Well, if we combine the results that we got above, using elbow method and Silhouette analysis method, we would probably use 4 as a k.
+
+```{r}
+set.seed(99)
+model <- kmeans(df_scaled, centers = 4, nstart = 25)
+model$size
+```
+
+The sizes of the clusters are similar to each other. Let's analyse the segments by the characteristics they were created. 
+
+```{r}
+round(aggregate(df_for_k_means, by=list(cluster = model$cluster), mean),2) %>% View()
+```
+
+* **1st segment - Discount & loyal customers**
+Very satisfied customers, who buy often, but their average check is relatively small. They have the largest cash back and probably they seek to gather it.
+
+* **2nd segment - Dissatisfied gift givers**
+Highly dissatisfied customers, who but rarely, but their average check is the biggest. They have the smallest cash back. In general, this segment brought the service **the least money**, compared to other segments. 
+
+* **3rd segment - Too good to be true**
+Customers with the satisfaction (3.5) higher than an average (mean = 2.8, median = 3). They have bought many times - more often than other segments, the value of their average check is the average among all segments. In general, this segment brought the service **the most money**, compared to other segments. 
+
+* **4th segment - Stray customers without preferences**
+* Dissatisfied customers (worse than an average), whose value of average check is the average among all segments. They have bought not often, but this segment brought the service more money than Dissatisfied gift givers.
+
+```{r}
+sber_clustered <- mutate(sber, segment = model$cluster)
+
+churn_cluster_df <- sber_clustered %>%
+group_by(segment, churn) %>%
+dplyr::summarize(count = n()) %>%
+  mutate(percentage = count/sum(count))
+
+churn_cluster_df$segment <- as.character(churn_cluster_df$segment)
+churn_cluster_df[churn_cluster_df == "1"] <- "Discount & loyal"
+churn_cluster_df[churn_cluster_df == "2"] <- "Dissatisfied gift givers"
+churn_cluster_df[churn_cluster_df == "3"] <- "Too good to be true"
+churn_cluster_df[churn_cluster_df == "4"] <- "Stray customer"
+
+ggplot(churn_cluster_df, aes(x =segment, y = percentage, fill =  churn)) +
+  geom_bar(position = "dodge", stat="identity", alpha = 0.7) +
+   labs(title = "Churn is the highest among segment - Too good to be true", x = "Customers' segment", y = "Number of customers") + 
+   scale_fill_manual("Churn", values = c('#367ECD', '#004AAD')) +
+geom_text(aes(label=scales::percent(percentage)), position = position_dodge(width=0.9), vjust=-0.25) + 
+  scale_y_continuous(labels = scales::percent) +
+theme_classic()
+```
+
+* The churn is the highest (16%) in the segment, in which customers brought the service the most money, compared to other segments. The churn is also high (14%) in the segment "Stray customers without preferences".
+
+## Recommendations:
+
+Due to a large amount of time since the last customer order, recommendations are:
+
+* Allocate money for conducting market basket analysis. This is the technique that helps the business understand product affinity. When your business will know the relationships between different products, your business will become powerful, because with these insights designers will know how to design interface so that supplements will be placed together or pop-up recommendations will be more effective, since they will be based on real links between products, so that a customer with higher probability would buy the products in the list of recommendations, compared to random recommendation system. Moreover, market basket analysis will make the promotions much more efficient, for example, the business would know their own loss leader product - the one which is needed for the majority of customers, with large short discount, that can boost customers to buy other non discounted goods since they are already on the website or in the application and have already ordered the necessary inexpensive good.
+
+* To conduct market basket analysis, Data engineer should start to gather transactional data that contain items bought by a single customer in a single purchase (two columns: transaction ID, product ID). Only after the necessary amount of data is collected, market basket analysis can be conducted.
+
+* Make the delivery free if the check is more than 600 rubles. This strategy would boost customers to order more goods.
+
+* Make a pop-up reminder that the service returns cash back to customers, which they can spend only for a limited time
+
+* To understand the reasons behind the low satisfaction, it is important to give the client the opportunity to fill out a brief feedback survey on the same day after the order is completed. Firstly, the clients should be asked to assess their satisfaction with the last order from 1 to 5, if the satisfaction is high, don't ask further questions. But if their assessment is average or low, than kindly ask them to note the aspects that did not satisfy them (prepare the list of possible aspects beforehand, so that customers can tick them) and write a short review if desired.
+
+* Offer an assistance to customers of old age groups (65-74 and 75+) to help them figure out how the website works, how to order the products, how to use recommendations, how to change the type of delivery and so on, proactively guide them to make sure that your website is understable by elderly people. Of course, it is better to call customers for such guides, but not use chat boxes. 
+
+* Creative marketing campaign should be conducted to inform customers about fast delivery to gain additional money. However, the promotion of express delivery should be targeted only on some segments of customers, for which this might be interesting, for example, for those group of people whose main complain about the service is the long time of delivery.
+
+* There is a highest churn in the "Too good to be true" segment. The customers in that segment brought the service the most money, compared to other segments. Probably, loyality program of the service is not developed well enough to retain such valuable customers, so customers from this segment may feel that they are not treated properly despite their high monetary contribution, so they switch to the competitor.
+
+* The last crucial recommendation is to gather more data about the customers because with more data about customers, the data science team can provide more insights and powerful predictions to the business, that help it to earn more money. No matter how professional your analysts are, they will not be able to detect important patterns in the data if there is not enough data and if is of poor quality (garbage in - garbage out). Gather information about marital status, number of children and etc. 
+
+
+# Predictive Models
+
+Let's build several regressions to predict important business metrics, as the customers' assessment of the service.
+
+## Explain satisfaction by linear regression 
+
+* What features can explain and predict customers' satisfaction:
+
+First of all, I need to run linear regression on all suitable variables.
+
+```{r}
+model_rate <- lm(mean_rate ~ gender + age_group + os + platform + num_orders + spendings + savings + timediff_order, data = sber)
+```
+
+The best model is the model that I got using the stepAIC() as this function helps to select only variables that possess significant explanatory power via multiple iterations.
+
+```{r}
+library(MASS)
+SatisfactionModelNew <- stepAIC(model_rate, trace = 0)
+summary(SatisfactionModelNew)
+```
+
+* The model significantly fits to the data (p-value is less than 0.05).
+* 11% of variance in customers' satisfaction can be explained (i.e. knowing the gender, age group, platform, number of orders, savings, the number of passed days since the last purchase).
+* Residual standard error is 1.5, it indicates the difference between the observed customers' satisfaction and satisfaction predicted by the model.
+
+**Insights:** 
+
+* men are more dissatisfied, than women on average.
+* the youngest age group (15-24) and the oldest ones (65-74) and 75+ are the most dissatisfied age groups. (Here the results of EDA and linear regression agree with each other.)
+* customers who use website to interact with the service rate the business worse than customers who use app on average. (Here the results of EDA and linear regression agree with each other too.)
+* the more orders customers make, the slightly more satisfied with the service they become. It is good news! (Here the results of EDA (correlation) and linear regression agree with each other too.)
+* the more customers accumulate cash back, the slightly more satisfied with the service they become. (Here the results of EDA (correlation) and linear regression agree with each other too.)
+
+More detailed and technical fingings, you can see below. 
+
+**Features of customers**
+
+* **Gender**: Men would rate the business by 0.26 points worse than women on average, holding everything else constant.
+
+* **Age group**:
+* Customers aged from 25 to 34 would rate the business by 0.27 higher than customers of age 15-24 on average, holding everything else constant.
+* Customers aged from 35 to 44 would rate the business by 0.42 higher than customers of age 15-24 on average, holding everything else constant.
+* Customers aged from 45 to 54 would rate the business by 0.41 higher than customers of age 15-24 on average, holding everything else constant.
+* Customers aged from 55 to 64  would rate the business by 0.27 higher than customers of age 15-24 on average, holding everything else constant.
+* Age groups 65-74 and 75+ are not different from the youngest group (15-24 years old) in their satisfaction with the service
+
+* **Platform**: Customers who use website to interact with the service would rate the business by 0.85 worse than customers who use app on average, holding everything else constant.
+
+* **Number of orders**: For each additional order the predicted satisfaction is 0.02 points higher, on average, holding everything else constant.
+
+* **Savings**: For each additional 1000 rubles of savings the predicted satisfaction is 0.014 points higher, on average, holding everything else constant.
+
+* **Days passed since last purchase**: For each additional 10 days passed since last purchase the predicted satisfaction is 0.014 points worse, on average, holding everything else constant - it is logical. 
+
+## Logistic regression to predict churn
+
+Here I'd like the model not only explain the variance in the target variable, but predict churners and non-churners.
+
+To do it, the data set should be divided by train (80%) and test (20%) data sets. 
+
+```{r}
+library(rsample)
+library(descr)
+set.seed(90)
+sber$churn <- ifelse(sber$churn == "Yes", 1, 0)
+df_split <- initial_split(sber, prop = .8)
+train_df <- training(df_split)
+test_df <- testing(df_split)
+```
+
+* What features can explain and predict customers' churn:
+
+```{r}
+logitModelFull <- glm(churn ~ gender + age_group + mean_rate + platform + num_orders + spendings + savings, data = train_df, family = binomial)
+logitModelNew <- stepAIC(logitModelFull, trace = 0)
+LogRegR2(logitModelNew)
+```
+
+In accordance with model quality metrics, it is not reasonable to apply logistic regression to predict churn with given features, but let's proceed with further analysis. 
+
+```{r}
+summary(logitModelNew)
+```
+
+Only four features can explain churn:
+
+* Mean rate
+* Platform (web vs app)
+* Number of orders
+* Spendings 
+
+```{r}
+coefsExp <- coef(logitModelNew) %>% exp() %>% round(2)
+coefsExp
+```
+
+* Being a user of the website of the company decreases the odds of leaving the company by a factor of 0.66. That being said, the odds for decision to churn are 66% smaller for users of website, compared to users of app, holding everything else constant.
+* Increasing the number of orders by 1 unit (1 order) will result in a 10% increase in odds of churn, holding everything else constant.
+
+* Recommendation: implement into your business process A/B tests to gradually come to the best versions of app and website.
+
+
+```{r}
+predictions <- predict(logitModelNew, newdata = test_df, type = "response")
+```
+
+```{r}
+predictions <- as.data.frame(predictions)
+predictions$p.class <- round(predictions$predictions, 0) 
+```
+
+```{r}
+library(caret)
+predictions$p.class <- if_else(predictions$predictions > 0.5,1,0)
+p.class = factor(predictions$p.class,levels = c(1,0))
+actual.factor = factor(test_df$churn, levels = c(1,0))
+confusionMatrix(p.class, actual.factor) #code from the lab's script
+```
+
+* The model is bad at predicting the churn. There are lot of False Negative predictions, it means that the model fails to identify customers who left the company as the churners. 
+The company would loose money because managers would treat future churners as customers who would not churn, so even if the company has effective marketing campaigns to reduce churn, this will not lead to profit growth, since managers simply will not apply the right company to the right category of people and future churners will remain without decent attention and will definitely leave the company.
+
+* The model correctly identify 10 churners out of 131 churners.
+
+* Also, there is a False Positive predictions for 10 customers, this would lead to the fact that the company will spend money on retaining customers who are not going to churn. 
+
+
+# Churn Prevention Policy 
+
+## Segment "To good to be true"
+
+* As I have found out earlier the highest churn (15%) is the among customers of segment "Too good to be true". The segmentation was based on k-means clustering. 
+* This segment is very valuable because clients in that segment brought the most money compared to other segments. Their satisfaction is 3.5 (which is higher than an average), so the customers probably are tired of the service and do not really want to boost the improvement of the company by writing down negative reviews - they just left the company. I can assume that people in this segment are committed to the service for the longest period of time as their number of orders is the biggest.
+* This situation can arise because of the absence of strong decent loyalty program in the company. It is possible that the reason behind the churn in this segment is that customers do not feel that the company appreciates them and it does not reward their loyalty in any way, meanwhile competitors treasure their loyal customers. The most valuable customers should get the VIP treatment.
+* Besides loyalty program, it is crucial to maintain customer interest in the company and build a brand community. The business should do the best out of social media. In Instagram you can share the news about the company's life or with product roadmap so customers can see what new welcome features are coming soon. Also, the business should start to spotlight the customers.
+* Come up with some nice privilege for customers of this segment as free express delivery 5 times in a month (nice privilege + the promotion of this type of delivery). 
+
+
